@@ -26,9 +26,13 @@ app.get('/api/logs', async (req, res) => {
         });
         const formattedLogs = response.data.map(logEntry => `${logEntry.log.timestamp} - ${logEntry.log.message}`).join('\n');
         res.type('text/plain').send(formattedLogs);
-    } catch (error) {
-        res.status(500).send('Fehler beim Abrufen der Render-Logs.');
-    }
+    // ...
+} catch (error) {
+    // DIESE ZEILE IST NEU UND GIBT UNS DIE EXAKTE FEHLERMELDUNG VON RENDER
+    console.error('Fehlerdetails von der Render API:', error.response?.data || error.message);
+    res.status(500).send('Fehler beim Abrufen der Render-Logs. Siehe Server-Logs für Details.');
+}
+// ...}
 });
 
 // API-Endpunkt für die Telegram-Nachrichten
