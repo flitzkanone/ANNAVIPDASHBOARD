@@ -21,7 +21,6 @@ let dataStore = {
 };
 
 // --- Telegram als Datenbank ---
-
 const telegramApi = axios.create({
     baseURL: `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`
 });
@@ -33,8 +32,6 @@ async function loadDataFromTelegram() {
         return;
     }
     try {
-        // Wir können die Nachricht nicht direkt lesen, aber wir leiten sie an uns selbst weiter, um den Inhalt zu bekommen.
-        // Ein kleiner Trick, da getMessage nicht direkt den Text liefert.
         const response = await telegramApi.post('/forwardMessage', {
             chat_id: DATABASE_CHAT_ID,
             from_chat_id: DATABASE_CHAT_ID,
@@ -42,13 +39,15 @@ async function loadDataFromTelegram() {
         });
         
         const messageText = response.data.result.text;
-        if (messageText) {
+        if (messageText && messageText.length > 2) {
             dataStore = JSON.parse(messageText);
             console.log('Daten erfolgreich aus Telegram geladen!');
+        } else {
+             console.log('Datenbank-Nachricht ist leer, starte mit leerem Speicher.');
+             dataStore = { rawMessages: [], users: {}, actions: [], dailyUsage: {} };
         }
     } catch (error) {
-        console.error('Fehler beim Laden der Daten aus Telegram. Starte mit leerem Speicher.', error.response?.data);
-        // Initialisiere mit leerem Store, falls die Nachricht leer oder fehlerhaft ist.
+        console.error('Fehler beim Laden der Daten aus Telegram. Starte mit leerem Speicher.');
         dataStore = { rawMessages: [], users: {}, actions: [], dailyUsage: {} };
     }
 }
@@ -58,11 +57,15 @@ async function saveDataToTelegram() {
     if (!DATABASE_CHAT_ID || !DATABASE_MESSAGE_ID) return;
     try {
         const dataString = JSON.stringify(dataStore, null, 2);
+        // Schutz vor dem Überschreiben mit leeren Daten bei einem Fehler
+        if (dataString.length < 30) { 
+            console.warn("Daten zum Speichern sind sehr kurz, überspringe das Speichern, um Datenverlust zu vermeiden.");
+            return;
+        }
         await telegramApi.post('/editMessageText', {
             chat_id: DATABASE_CHAT_ID,
             message_id: DATABASE_MESSAGE_ID,
             text: dataString,
-            // Deaktiviere Link-Vorschau
             disable_web_page_preview: true
         });
         console.log('Daten erfolgreich in Telegram gespeichert.');
@@ -75,7 +78,7 @@ async function saveDataToTelegram() {
 app.use(express.static('public'));
 app.use(bodyParser.json());
 
-// --- API Endpunkte (bleiben fast gleich, greifen nur auf dataStore zu) ---
+// --- API Endpunkte (unverändert) ---
 app.get('/api/logs', async (req, res) => {
     // ... (unverändert)
     if (!RENDER_API_KEY || !RENDER_SERVICE_ID) {
@@ -92,34 +95,26 @@ app.get('/api/logs', async (req, res) => {
         res.status(500).send('Fehler beim Abrufen der Render-Logs. Siehe Server-Logs für Details.');
     }
 });
-
 app.get('/api/stats', (req, res) => {
-    // Statistik 1: Aktionen nach Betrag
+    // ... (unverändert)
     const actionCounts = { 5: 0, 10: 0, 15: 0, 25: 0, 30: 0 };
     dataStore.actions.forEach(action => {
         if (actionCounts[action.value] !== undefined) actionCounts[action.value]++;
     });
-
-    // Statistik 2: Nutzerliste
-    const userList = Object.values(dataStore.users).map(u => ({ id: u.id, name: u.name }));
-
-    // Statistik 3: Nutzer pro Tag
+    const userList = Object.values(dataStore.users).map(u => ({ id: u.id, name: u.name })).sort((a, b) => a.name.localeCompare(b.name));
     const userGrowth = {};
     for (let i = 29; i >= 0; i--) {
-        const d = new Date();
-        d.setDate(d.getDate() - i);
+        const d = new Date(); d.setDate(d.getDate() - i);
         const dateString = d.toISOString().split('T')[0];
         userGrowth[dateString] = dataStore.dailyUsage[dateString] || 0;
     }
-    
     res.json({
         rawMessages: dataStore.rawMessages,
         stats: { actionCounts, userList, userGrowth }
     });
 });
 
-
-// --- Telegram Webhook (Kernlogik) ---
+// --- Telegram Webhook (ANGEPASSTE LOGIK) ---
 app.post(`/telegram/webhook`, (req, res) => {
     const message = req.body.message || req.body.channel_post;
     if (!message || !message.text) return res.sendStatus(200);
@@ -127,7 +122,7 @@ app.post(`/telegram/webhook`, (req, res) => {
     const now = new Date();
     const text = message.text;
 
-    // 1. Raw Message speichern
+    // Speichere jede Nachricht im Live-Feed
     dataStore.rawMessages.unshift({
         user: message.from ? message.from.first_name : message.chat.title,
         text: text,
@@ -135,43 +130,44 @@ app.post(`/telegram/webhook`, (req, res) => {
     });
     dataStore.rawMessages = dataStore.rawMessages.slice(0, 50);
     
-    // 2. Nachrichten parsen
-    const newUserMatch = text.match(/🎉Neuer Nutzer gestartet!\nID: (.*)\nName: (.*)/);
-    const actionMatch = text.match(/Aktion: (?:🎟️Gutschein|💰 Paypal|🪙 Krypto) für (\d+)€/);
+    // --- NEUE PARSING-LOGIK ---
+    // Wir verwenden reguläre Ausdrücke, um die Teile aus der Nachricht zu extrahieren.
+    const userMatch = text.match(/ID: (\d+)\nName: (.*)/);
+    const actionMatch = text.match(/Aktion: .*? für (\d+)€/);
 
-    if (newUserMatch) {
-        const id = newUserMatch[1].trim();
-        const name = newUserMatch[2].trim();
+    // Wir verarbeiten nur, wenn wir BEIDE Teile finden.
+    if (userMatch && actionMatch) {
+        // 1. Nutzerdaten extrahieren und verarbeiten
+        const id = userMatch[1].trim();
+        const name = userMatch[2].trim();
         const today = now.toISOString().split('T')[0];
         const user = dataStore.users[id];
         const oneDay = 24 * 60 * 60 * 1000;
 
+        // Tägliche Nutzerstatistik aktualisieren (nur einmal alle 24h pro Nutzer)
         if (!user || (now - new Date(user.lastLogin)) > oneDay) {
             dataStore.dailyUsage[today] = (dataStore.dailyUsage[today] || 0) + 1;
         }
+        // Nutzer in die Liste eintragen/aktualisieren
         dataStore.users[id] = { id, name, lastLogin: now.toISOString() };
 
-    } else if (actionMatch) {
+        // 2. Aktionsdaten extrahieren und verarbeiten
         const value = parseInt(actionMatch[1], 10);
         dataStore.actions.push({ value: value, timestamp: now.toISOString() });
+        
+        console.log(`Verarbeitet: Nutzer ${name} (ID: ${id}) mit Aktion ${value}€`);
     }
-    
-    // Wichtig: Wir bestätigen Telegram sofort, dass die Nachricht ankam.
-    res.sendStatus(200);
 
-    // Das Speichern passiert *nachdem* wir Telegram geantwortet haben, um Timeouts zu vermeiden.
-    // Wir speichern nicht bei jeder Nachricht, um die API nicht zu überlasten (Debouncing).
-    // Setze einen Timer, um in 10 Sekunden zu speichern. Wenn eine neue Nachricht kommt, wird der alte Timer gelöscht.
+    res.sendStatus(200); // Wichtig: Telegram sofort antworten.
+
+    // Das Speichern wird wie zuvor verzögert ausgelöst.
     clearTimeout(global.saveTimeout);
-    global.saveTimeout = setTimeout(saveDataToTelegram, 10000); // 10 Sekunden warten
+    global.saveTimeout = setTimeout(saveDataToTelegram, 10000);
 });
-
 
 // --- Server Start ---
 app.listen(PORT, async () => {
     await loadDataFromTelegram();
     console.log(`Server läuft auf Port ${PORT}`);
-    
-    // Speichere alle 5 Minuten, falls keine neuen Nachrichten kommen
     setInterval(saveDataToTelegram, 5 * 60 * 1000); 
 });
