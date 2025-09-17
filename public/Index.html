@@ -3,62 +3,119 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mein Dashboard</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; color: #333; }
-        .container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1400px; margin: auto; }
-        .panel { background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 20px; display: flex; flex-direction: column; }
-        h1 { text-align: center; color: #1a202c; }
-        h2 { border-bottom: 2px solid #eee; padding-bottom: 10px; margin-top: 0; }
-        #renderLogs { white-space: pre-wrap; font-family: 'Menlo', 'Consolas', monospace; background: #2d2d2d; color: #dcdcdc; padding: 15px; border-radius: 5px; flex-grow: 1; overflow-y: scroll; font-size: 13px; }
-        #messageList { list-style: none; padding: 0; margin: 0; flex-grow: 1; overflow-y: auto; }
-        #messageList li { border-bottom: 1px solid #eee; padding: 10px 0; }
-        .msg-meta { font-size: 0.8em; color: #888; margin-top: 4px; }
-        @media (max-width: 800px) { .container { grid-template-columns: 1fr; } }
-    </style>
+    <title>Render & Telegram Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
-    <h1>Dashboard</h1>
-    <div class="container">
-        <div class="panel">
+    <header class="main-header">
+        <h1><span class="status-indicator"></span>Log Analytics</h1>
+        <div class="header-actions">
+            <span id="lastUpdated"></span>
+        </div>
+    </header>
+
+    <main class="dashboard-grid">
+        <div class="panel panel-logs">
             <h2>Render Service Logs</h2>
-            <pre id="renderLogs">Lade Logs...</pre>
+            <div class="panel-content">
+                <pre id="renderLogs">Verbinde mit dem Service...</pre>
+            </div>
         </div>
-        <div class="panel">
-            <h2>Telegram Gruppe</h2>
-            <ul id="messageList"><li>Lade Nachrichten...</li></ul>
+
+        <div class="panel panel-telegram-list">
+            <h2>Telegram Gruppen-Feed</h2>
+            <div class="panel-content">
+                <ul id="messageList">
+                    <li>Warte auf Nachrichten...</li>
+                </ul>
+            </div>
         </div>
-    </div>
+
+        <div class="panel panel-kpi">
+            <h2>Nachrichten</h2>
+            <div class="panel-content">
+                <div class="kpi-value" id="messageCount">0</div>
+                <div class="kpi-label">Letzte 50 Nachrichten</div>
+            </div>
+        </div>
+
+        <div class="panel panel-kpi">
+            <h2>Service Status</h2>
+            <div class="panel-content">
+                <div class="kpi-value status-text" id="serviceStatus">PRÜFE...</div>
+                <div class="kpi-label" id="serviceIdLabel"></div>
+            </div>
+        </div>
+    </main>
 
     <script>
         const logsElement = document.getElementById('renderLogs');
         const messagesListElement = document.getElementById('messageList');
-
-        const fetchData = async () => {
-            // Render Logs abrufen
+        const messageCountElement = document.getElementById('messageCount');
+        const serviceStatusElement = document.getElementById('serviceStatus');
+        const serviceIdLabel = document.getElementById('serviceIdLabel');
+        const lastUpdatedElement = document.getElementById('lastUpdated');
+        const statusIndicator = document.querySelector('.status-indicator');
+        
+        // Hole die Service-ID aus der URL zur Anzeige (optional, nice-to-have)
+        const RENDER_SERVICE_ID = "<%= process.env.RENDER_SERVICE_ID %>";
+        if (serviceIdLabel) {
+            serviceIdLabel.textContent = `ID: ${process.env.RENDER_SERVICE_ID || 'Nicht gesetzt'}`;
+        }
+        
+        async function fetchData() {
+            const now = new Date();
+            lastUpdatedElement.textContent = `Last update: ${now.toLocaleTimeString('de-DE')}`;
+            
+            // --- Render Logs abrufen ---
             try {
                 const logsResponse = await fetch('/api/logs');
-                logsElement.textContent = await logsResponse.text();
-                logsElement.scrollTop = logsElement.scrollHeight; // Nach unten scrollen
+                if (!logsResponse.ok) throw new Error(`HTTP error! status: ${logsResponse.status}`);
+                
+                const logsText = await logsResponse.text();
+                logsElement.textContent = logsText.trim() ? logsText : 'Keine neuen Logs vorhanden.';
+                logsElement.scrollTop = logsElement.scrollHeight; // Immer nach unten scrollen
+
+                serviceStatusElement.textContent = 'ONLINE';
+                serviceStatusElement.className = 'kpi-value status-text status-online';
+                statusIndicator.classList.add('online');
+
             } catch (e) {
-                logsElement.textContent = 'Fehler beim Laden der Logs.';
+                logsElement.textContent = 'Fehler beim Laden der Logs.\nPrüfe die Service-ID und den API-Key.';
+                serviceStatusElement.textContent = 'FEHLER';
+                serviceStatusElement.className = 'kpi-value status-text status-error';
+                statusIndicator.classList.remove('online');
+                console.error(e);
             }
 
-            // Telegram Nachrichten abrufen
+            // --- Telegram Nachrichten abrufen ---
             try {
                 const tgResponse = await fetch('/api/telegram-messages');
+                if (!tgResponse.ok) throw new Error(`HTTP error! status: ${tgResponse.status}`);
+
                 const messages = await tgResponse.json();
-                messagesListElement.innerHTML = messages.length === 0
-                    ? '<li>Keine Nachrichten vorhanden.</li>'
-                    : messages.map(msg => `
+                messageCountElement.textContent = messages.length;
+                
+                if (messages.length === 0) {
+                    messagesListElement.innerHTML = '<li class="empty">Keine Nachrichten vorhanden.</li>';
+                } else {
+                    messagesListElement.innerHTML = messages.map(msg => `
                         <li>
-                            <strong>${msg.user}:</strong> ${msg.text}
-                            <div class="msg-meta">${msg.timestamp}</div>
+                            <div class="msg-header">
+                                <strong>${msg.user}</strong>
+                                <span class="msg-meta">${msg.timestamp}</span>
+                            </div>
+                            <p class="msg-text">${msg.text}</p>
                         </li>`).join('');
+                }
             } catch (e) {
-                messagesListElement.innerHTML = '<li>Fehler beim Laden der Nachrichten.</li>';
+                messagesListElement.innerHTML = '<li class="empty">Fehler beim Laden der Nachrichten.</li>';
+                console.error(e);
             }
-        };
+        }
 
         // Beim Start laden und dann alle 10 Sekunden aktualisieren
         fetchData();
